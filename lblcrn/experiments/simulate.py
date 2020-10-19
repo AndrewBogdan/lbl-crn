@@ -42,7 +42,7 @@ def simulate_xps(rsys: RxnSystem,
         **options: Forwarded to scipy.integrate.solve_ivp
 
     Returns:
-        A Solution object describing the solution.
+        An XPSExperiment with the simulation results.
     """
     end_when_settled = end_when_settled or (time is None)
 
@@ -96,7 +96,8 @@ def simulate_xps_with_cts(rsys: RxnSystem,
         **options: Forwarded to scipy.integrate.solve_ivp
 
     Returns:
-        A Solution object describing the solution.
+        An XPSExperiment with the simulation results as well as a CRNTimeSeries object with the
+        time series data.
     """
     end_when_settled = end_when_settled or (time is None)
 
