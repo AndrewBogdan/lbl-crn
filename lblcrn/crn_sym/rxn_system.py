@@ -97,7 +97,7 @@ class RxnSystem(monty.json.MSONable):
             elif isinstance(component, species.SpeciesManager):
                 self.species_manager = component
             else:
-                assert False, f'Unknown input {component} of type ' + str(type(component)) + ' to reaction system.'
+                raise AssertionError(f'Unknown input {component} of type ' + str(type(component)) + ' to reaction system.')
 
         assert self.species_manager is not None, 'Must pass a species manager to a solution system.'
 

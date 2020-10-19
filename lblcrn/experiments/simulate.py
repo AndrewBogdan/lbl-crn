@@ -46,7 +46,7 @@ def simulate_xps(rsys: RxnSystem,
     """
     end_when_settled = end_when_settled or (time is None)
 
-    sol_t, sol_y = bulk_crn.solve_rsys_ode(rsys, time, end_when_settled, **options)
+    sol_t, sol_y = bulk_crn.solve_rsys_ode(rsys, time or 0, end_when_settled, **options)
     cts = time_series.CRNTimeSeries(sol_t, sol_y, rsys)
 
     return cts.xps_with(title=title,
