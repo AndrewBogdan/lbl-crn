@@ -6,6 +6,7 @@ import csv
 import numpy as np
 from scipy.stats import norm
 import lblcrn.surface_crn.xps as xps
+from lblcrn.common.util import resample_by_skipping
 import os
 from IPython.display import HTML
 import ffmpeg
@@ -22,7 +23,11 @@ class Results:
     """
     TIME_COL_NAME = "Time (s) "  # column name used for the time entry
 
-    def __init__(self, manifest_file, rxns, df=None):
+    def __init__(self, manifest_file, rxns, df=None,
+                 sum_be=True,
+                 sum_sub_species=True,
+                 resample=True,
+                 resample_method="average"):
         """
         :param manifest_file:
         :param rxns:
@@ -31,6 +36,7 @@ class Results:
 
         self.manifest_file = manifest_file
         self.rxns = rxns
+
         self.df = df.copy()
         self.df.rename_axis(Results.TIME_COL_NAME, inplace=True)
 
@@ -40,7 +46,15 @@ class Results:
                 # print(f"dividing species {s.name} by {s.size}")
                 self.df[s.name] = self.df[s.name] / s.size
 
-        self.resample_evolution()
+        if resample:
+            if resample_method == "average":
+                self.resample_evolution()
+            elif resample_method == "skip":
+                self.df_raw = self.df
+                self.df = resample_by_skipping(self.df)
+        else:
+            # Avoid potential problems for not having a df_raw
+            self.df_raw = self.df
 
         self.xps_df = None  # The xps dataframe we have for reference
 
@@ -50,14 +64,23 @@ class Results:
         color_index = rxns.get_colors()
         sub_s_list = []
         [sub_s_list.extend(l) for l in rxns.species_manager.to_sum_dict.values()]
-        # print(sub_s_list)
         primary_s = rxns.species_manager.to_sum_dict.keys()
         species_tracked = sorted(list(set(list(rxns.get_symbols()) + list(primary_s))), key=lambda s: str(s))
         self.species_ordering = [s for s in species_tracked if s in primary_s or s not in sub_s_list]
+        self.sub_s_list = sub_s_list
         self.species_colors = {s: color_index[s] for s in self.species_ordering}
+
+        marker_names = rxns.species_manager.get_marker_names()
+        self.marker_names_ordering = sorted(marker_names)
+        self.marker_colors = {marker_name: ''.join(color_to_HEX(color_index[marker_name], zero_to_one_range=False)) for marker_name in
+                              marker_names}
+
         self.species_ordering = [str(s) for s in self.species_ordering]
-        self.species_colors = {str(s): color_to_HEX(c) for s, c in self.species_colors.items()}
+        self.species_colors = {str(s): ''.join(color_to_HEX(c, zero_to_one_range=False)) for s, c in self.species_colors.items()}
+        self.sub_species_colors = {str(s): ''.join(color_to_HEX(color_index[s], zero_to_one_range=False)) for s in self.sub_s_list}
+
         import sympy as sym
+
         self.substances = {s: rxns.species_manager.species_from_symbol(sym.Symbol(s)) for s in self.species_ordering}\
             if rxns else {}
         # species_tracked = list(rxns.get_symbols() + list(primary_s))
@@ -68,24 +91,63 @@ class Results:
         # self.species_ordering = [s.name for s in self.species_ordering]
         # self.species_colors = {s.name: color_to_HEX(c) for s, c in self.species_colors.items()}
 
-
         sub_s = rxns.species_manager.to_sum_dict
-        self.sum_sub_species(sub_s)
-        self.sum_same_be()
-
+        if sum_sub_species:
+            self.sum_sub_species(sub_s)
+        if sum_be:
+            self.sum_same_be()
 
         # Play the videos
         self.video = None
         self.video_trajectory = None
 
+    @staticmethod
+    def from_directory(path, rxns):
+        """
+        Construct a results object from based on a directory.
+        :param path:
+        :param rxns:
+        :return:
+        """
+        if os.path.isfile(f"{path}/Data.gz"):
+            return Results(f"{path}/reaction_rules.txt", rxns, pd.read_csv(f"{path}/Data.gz"))
+        else:
+            return Results(f"{path}/reaction_rules.txt", rxns, pd.read_csv(f"{path}/Data.csv"))
 
-    # def extend(self, df):
-    #     """
-    #     A
-    #     :param df:
-    #     :return:
-    #     """
+    @staticmethod
+    def from_trajectory(path, rxns):
+        """
+        Construct a results object based on a directory in which there is a trajectory file named "trajectory.gzip".
+        """
+        df = pd.read_csv(f"{path}/trajectory.gzip", compression="gzip")
+        print(f"Dataframe already created, with a length of {len(df.index)}")
+        return Results(None, rxns, df,
+                       sum_sub_species=False,
+                       resample=False)
 
+    @staticmethod
+    def from_concs_times(manifest_file, rxns, concs, times):
+        """
+        :param manifest_file: The manifest file corresponding to the concs dictionary;
+        :param concs: a dictionary from species name (string) to a list of concentration values;
+        :param times: a list of time steps corresponding to the time steps for each list in concs
+        :return: a new Solution object
+        """
+        r = Results(manifest_file, rxns, Results.concs_times_df(concs, times))
+        return r
+
+    @staticmethod
+    def from_counts(rxns, counter):
+        """
+        :param rxns: a rxn_system object
+        :param counter: a dictionary from species name to counts
+        :return: a results object representing only 1 timestep.
+        """
+        concs = {s: [c] for s, c in counter.items()}
+        for s in rxns.get_symbols():
+            if str(s) not in concs:
+                concs[str(s)] = [0]
+        return Results.from_concs_times(None, rxns, concs, [0])
 
     @staticmethod
     def side_by_side_axes(num_axes=2, output_fig=False):
@@ -101,7 +163,8 @@ class Results:
 
         def trim_axs(axs, N):
             """little helper to massage the axs list to have correct length..."""
-            """https://matplotlib.org/3.1.1/gallery/lines_bars_and_markers/markevery_demo.html#sphx-glr-gallery-lines-bars-and-markers-markevery-demo-py"""
+            """https://matplotlib.org/3.1.1/gallery/lines_bars_and_markers/
+            markevery_demo.html#sphx-glr-gallery-lines-bars-and-markers-markevery-demo-py"""
             axs = axs.flat
             for ax in axs[N:]:
                 ax.remove()
@@ -152,43 +215,6 @@ class Results:
         df = df.groupby("Time (s)").mean()
         self.df_raw = self.df
         self.df = df.reset_index().set_index("Time (s)")
-
-    @staticmethod
-    def from_directory(path, rxns):
-        """
-        Construct a results object from based on a directory.
-        :param path:
-        :param rxns:
-        :return:
-        """
-        if os.path.isfile(f"{path}/Data.gz"):
-            return Results(f"{path}/reaction_rules.txt", rxns, pd.read_csv(f"{path}/Data.gz"))
-        else:
-            return Results(f"{path}/reaction_rules.txt", rxns, pd.read_csv(f"{path}/Data.csv"))
-
-    @staticmethod
-    def from_concs_times(manifest_file, rxns, concs, times):
-        """
-        :param manifest_file: The manifest file corresponding to the concs dictionary;
-        :param concs: a dictionary from species name (string) to a list of concentration values;
-        :param times: a list of time steps corresponding to the time steps for each list in concs
-        :return: a new Solution object
-        """
-        r = Results(manifest_file, rxns, Results.concs_times_df(concs, times))
-        return r
-
-    @staticmethod
-    def from_counts(rxns, counter):
-        """
-        :param rxns: a rxn_system object
-        :param counter: a dictionary from species name to counts
-        :return: a results object representing only 1 timestep.
-        """
-        concs = {s: [c] for s, c in counter.items()}
-        for s in rxns.get_symbols():
-            if str(s) not in concs:
-                concs[str(s)] = [0]
-        return Results.from_concs_times(None, rxns, concs, [0])
 
     @staticmethod
     def concs_times_df(concentrations, times):
@@ -297,6 +323,7 @@ class Results:
         Sum the number of species with the same binding energy.
         :return:
         """
+        return
         bes_to_names = {}
         to_sum = {}
         for name in self.species_ordering:
@@ -311,9 +338,44 @@ class Results:
         # for v in to_sum.values:
         # TODO: how shall we name the summed species?
 
+    # TODO: test
+    def compute_coverage_df(self, names_by_site=None, num_nodes_by_sites={}, df=None):
+        """
+        :return: a dataframe for the trajectory of coverage instead of absolute species
+        count.
+        """
+        if df is None:
+            df = self.df_raw
+
+        if names_by_site is None:
+            names_by_site = self.rxns.species_manager.names_by_site_name
+
+        # TODO: make num_nodes_by_site in surface class
+
+        coverage_dfs = {site: pd.DataFrame() for site in num_nodes_by_sites}
+        for site, num_nodes in num_nodes_by_sites.items():
+            for name in names_by_site[site]:
+                coverage_dfs[site][name] = df[name] / num_nodes
+        return coverage_dfs
+
     # TODO: decrease the figure size in case zoom = False
-    def plot_evolution(self, species_in_figure=None, start_time=0, end_time=-1, title="", ax=None, save=False,
-                       return_fig=False, path="", use_raw_data=False, zoom=False):
+    def plot_evolution(self,
+                       names_in_figure=None,
+                       start_time=0,
+                       end_time=-1,
+                       title="",
+                       ax=None,
+                       save=False,
+                       return_fig=False,
+                       path="",
+                       use_raw_data=False,
+                       df=None,
+                       zoom=False,
+                       show_fig=True,
+                       x_axis_xlim=0,
+                       include_markers=True,
+                       legend_loc="upper right",
+                       y_label="Molecule Count (#)"):
         """
         Plot the concentrations from start_time until time step end_time. -1 means till the end.
 
@@ -321,19 +383,46 @@ class Results:
         """
         plt.style.use('seaborn-white')
         if end_time == -1:
-            end_time = self.df.index.max()
+            end_time = self.df_raw.index.max()
 
-        if use_raw_data:
+        # print("end time", '{:.15f}'.format(end_time))
+
+        if not legend_loc:
+            legend_loc = "best"
+
+        if df:
+            df = df
+        elif use_raw_data:
             df = self.df_raw
         else:
             df = self.df
         df = df[(df.index <= end_time) & (df.index >= start_time)]
 
-        if species_in_figure is None:
+        if names_in_figure is None:
+            names_in_figure = self.species_ordering
             species_in_figure = self.species_ordering
+            markers_in_figure = self.marker_names_ordering
+            sub_species_in_figure = self.sub_s_list
+        # Sort user provided names into species and/or markers.
+        else:
+            species_in_figure = []
+            markers_in_figure = []
+            sub_species_in_figure = []
+            for name in names_in_figure:
+                if name in self.species_ordering:
+                    species_in_figure.append(name)
+                    if name in self.marker_names_ordering:
+                        raise ValueError(f"Marker {name} cannot share a name with a species, a site, or the surface")
+                elif name in self.marker_names_ordering:
+                    markers_in_figure.append(name)
+                elif name in self.sub_s_list:
+                    sub_species_in_figure.append(name)
+                # TODO: verify the following sentence is absolutely accurate.
+                else:
+                    raise ValueError(f"Name {name} is not in the reaction system.")
 
         if zoom:
-            irange = range(len(species_in_figure) - 1)
+            irange = range(len(names_in_figure) - 1)
         else:
             irange = [0]
 
@@ -354,20 +443,41 @@ class Results:
 
         for i in irange:
             ax = axes[i]
+            ax.set_xlim(left=x_axis_xlim, right=end_time)
             for j in range(i, len(species_in_figure)):
                 species = species_in_figure[j]
                 ax.tick_params(axis='both', which='both', labelsize=12)
                 ax.plot(df[species], color=self.species_colors[species], label=species, linewidth=2)
-                ax.legend(fontsize=12, numpoints=30)
+                ax.legend(fontsize=12, numpoints=30, loc=legend_loc)
+
+            # for sub_species_name in sub_species_in_figure:
+            #     ax.tick_params(axis='both', which='both', labelsize=12)
+            #     ax.plot(df[sub_species_name], color=self.sub_species_colors[sub_species_name], label=sub_species_name, linewidth=2)
+            #     ax.legend(fontsize=12, numpoints=30, loc=legend_loc)
+
+            if include_markers:
+                for marker_name in markers_in_figure:
+                    ax.tick_params(axis='both', which='both', labelsize=12)
+                    ax.plot(df[marker_name], color=self.marker_colors[marker_name], label=marker_name, linewidth=2)
+                    ax.legend(fontsize=12, numpoints=30, loc=legend_loc)
+
+
+
 
             ax.set_title(title)
             ax.set_xlabel("Time (s)", fontsize=12)
-            ax.set_ylabel("Molecule Count (#)", fontsize=12)
+            ax.set_ylabel(y_label, fontsize=12)
+
+        if not show_fig:
+            if ax_given:
+                raise Exception("Ax is given as a parameter. This function has no control over whether the figure "
+                                + "will show.")
+            plt.close(fig=fig)
         if save:
             if ax_given:
                 raise Exception("Ax is given as a parameter. Please save outside of this function. \n" +
                                 "Alternatively, try not giving ax as a parameter to this function")
-            fig.savefig(f"{path}/{title}")
+            fig.savefig(f"{path}/{title}", dpi=300)
         if return_fig:
             # if ax_given:
             #     raise Exception("Ax is given as a parameter, and therefore fig
@@ -383,7 +493,6 @@ class Results:
 
         # TODO
         # print(s)
-
         sigma = 0.75 * np.sqrt(2) / (np.sqrt(2 * np.log(2)) * 2)
         bes = [self.substances[name].orbitals[0].binding_energy for name in self.species_ordering]
         x_axis = np.arange(min(bes) - 5, max(bes) + 5, .1)
@@ -417,8 +526,8 @@ class Results:
         max_be = max(gaussian.index.max(), xps_df.index.max())
         return xps.fill_zeros(gaussian, min_be, max_be), xps.fill_zeros(xps_df, min_be, max_be)
 
-    def plot_gaussian(self, t=-1, avg_duration=1, path="", xps_path="", xps_scaling=1, save=False, return_fig=False, fig_size="Default",
-                      dpi=100, scaling_factor=1, ax=None, envelope_name="CRN"):
+    def plot_gaussian(self, t=-1, avg_duration=1, path="", xps_path="", xps_scaling=1, save=False, return_fig=False,
+                      fig_size="Default", dpi=100, scaling_factor=1, ax=None, envelope_name="CRN"):
         """
         Plot the Gaussian function from time t to time t + 1.
         """
@@ -490,21 +599,24 @@ class Results:
             ax.figure.savefig("{}/spectrum.png".format(path))
         if return_fig:
             # Usually, you don't need to return because plot would draw the graph in the current
-            # Jupter Notebbok. Return only when you need the figure.
+            # Jupyter Notebook. Return only when you need the figure.
             return ax.figure
 
     def raw_string_gaussian(self, t=-1, avg_duration=1, y_upper_limit=None,  xps_scaling=1, fig_size="Default", dpi=100,
                             scaling_factor=1, ax=None):
         """
         A wrapper function for self.plot_gaussian intended for generating frames in Pygame videos.
+
+        # TODO: explain the use of fig_size
         :return: raw string representation of the figure
         """
         backend = matplotlib.rcParams['backend']
         matplotlib.use("Agg")
         # TODO: determine if this solves the issue with inconsistent font.
         matplotlib.rcParams["font.family"] = "arial"
-        fig = self.plot_gaussian(t=t, avg_duration=avg_duration, xps_scaling=xps_scaling, return_fig=True, fig_size=fig_size, dpi=dpi,
-                                 scaling_factor=scaling_factor, ax=ax, envelope_name="total")
+        fig = self.plot_gaussian(t=t, avg_duration=avg_duration, xps_scaling=xps_scaling, return_fig=True,
+                                 fig_size=fig_size, dpi=dpi, scaling_factor=scaling_factor, ax=ax,
+                                 envelope_name="total")
         fig.tight_layout()
         matplotlib.pyplot.ylim((0, y_upper_limit))
         canvas = agg.FigureCanvasAgg(fig)
@@ -512,6 +624,7 @@ class Results:
         renderer = canvas.get_renderer()
         matplotlib.use(backend)
         # TODO: close plt in case too many plots got opened.
+        plt.close(fig)
         return renderer.tostring_rgb(),  canvas.get_width_height()
 
     def save(self, directory=None):

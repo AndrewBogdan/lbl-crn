@@ -36,7 +36,6 @@ from sklearn import metrics
 import sympy as sym
 from lblcrn import bulk_crn
 from lblcrn.experiments import experiment
-from lblcrn.experiments import time_series
 from lblcrn.crn_sym.rxn_system import RxnSystem
 from lblcrn.crn_sym import species
 from lblcrn.common import util
@@ -130,6 +129,11 @@ class XPSObservable:
             return self.df[self._EXPERIMENTAL]
         return None
 
+    @experimental.setter
+    def experimental(self, value):
+        self.df[self._EXPERIMENTAL] = value
+        return None
+
     @property
     def exp_clean(self) -> Optional[pd.Series]:
         """The experimental data without the gas phase or contaminants."""
@@ -176,6 +180,9 @@ class XPSObservable:
     def deconv_gaussians(self) -> Optional[pd.DataFrame]:
         """The deconvoluted gaussians of the XPS observable."""
         # Gaussians have a species as their column name
+        if not self.deconvoluted:
+            return None
+
         gauss_cols = []
         for col in self.deconvoluted:
             if isinstance(col, sym.Symbol):
@@ -619,6 +626,11 @@ class XPSExperiment(experiment.Experiment, XPSObservable):
         """The factor by which the simulated data is currently scaled."""
         return self._scale_factor
 
+    @scale_factor.setter
+    def scale_factor(self, scale_factor):
+        """The factor by which the simulated data is currently scaled."""
+        self._scale_factor = scale_factor
+
     @property
     def sim_concs(self) -> Optional[Dict[sym.Symbol, float]]:
         """The simulated concentrations of each species."""
@@ -850,7 +862,6 @@ class XPSExperiment(experiment.Experiment, XPSObservable):
         # Don't deconvolute species which are being decontaminated out
         deconv_species = [specie for specie in deconv_species
                           if specie not in contam_species]
-
         # Handle: deconvolute
         # deconvolute requires experimental
         if deconvolute and not experimental:
@@ -949,8 +960,9 @@ class XPSExperiment(experiment.Experiment, XPSObservable):
                                    gas_interval[0] > gas_interval[1]))
         assert not (decontaminate and not experimental)
         assert not (contaminate and not simulate)
-        assert not ((decontaminate or contaminate) and not contam_spectra)
-        assert not ((decontaminate or contaminate) and not contam_species)
+        # TODO(Andrew): Fix these assertions
+        # assert not ((decontaminate or contaminate) and not contam_spectra)
+        # assert not ((decontaminate or contaminate) and not contam_species)
         assert not (contaminate and decontaminate)
         assert not (deconvolute and not experimental)
         assert not (deconvolute and not deconv_species)
@@ -972,7 +984,7 @@ class XPSExperiment(experiment.Experiment, XPSObservable):
                 species_to_plot.extend(sim_species)
             # Don't bother with deconv_/contam_species, because if they're
             # defined, then the x_range will be exp_data.index anyway.
-            x_range = XPSExperiment._get_x_range(species=species_to_plot)
+            x_range = self._get_x_range(species=species_to_plot)
             _echo.echo(f'Using automatically-generated x-range '
                        f'[{x_range[0]}, ..., {x_range[-1]}]...')
 
@@ -1417,7 +1429,6 @@ class XPSExperiment(experiment.Experiment, XPSObservable):
             d['experimental'].index = d['experimental'].index.map(float)
         return cls(**d)
 
-
 def simulate_xps(rsys: RxnSystem,
                  time: Optional[float] = None,
                  end_when_settled: bool = False,
@@ -1470,4 +1481,7 @@ def simulate_xps(rsys: RxnSystem,
                         contam_spectra=contam_spectra,
                         deconv_species=deconv_species,
                         autoresample=autoresample,
-                        autoscale=autoscale, )
+                        autoscale=autoscale)
+
+def simulate_xps_with_cts():
+    print("this function has been moved to simulate.py")

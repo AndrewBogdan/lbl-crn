@@ -2,12 +2,13 @@ import copy
 from typing import List
 import sympy as sym
 import monty.json
+import networkx as nx
 import random
 
 import lblcrn
 from lblcrn.crn_sym import species
 from lblcrn.crn_sym import conditions
-from lblcrn.crn_sym.reaction import Rxn
+from lblcrn.crn_sym.reaction import Rxn, RevRxn
 
 from lblcrn.crn_sym import surface
 from lblcrn.crn_sym.surface_reaction import SurfaceRxn
@@ -23,6 +24,7 @@ class RxnSystem(monty.json.MSONable):
     Attributes:
         components: Everything the RxnSystem contains
         terms: Terms in the ODE of the system.
+        reactions: Bulk CRN reactions in the system.
         schedules: The Schedules and Concs passed during initialization.
         conc_eqs: The ConcEqs in the system.
         conc_diffeqs: The ConcDiffEqs in the system.
@@ -72,6 +74,7 @@ class RxnSystem(monty.json.MSONable):
         self.conc_diffeqs = []
         self.species_manager = None
         self.surface = None
+        self.reactions = []
 
         for component in self.components:
             if isinstance(component, conditions.Schedule):
@@ -81,6 +84,7 @@ class RxnSystem(monty.json.MSONable):
                 # pass
                 self.surface_rxns.append(component)
             elif isinstance(component, Rxn):
+                self.reactions.append(component)
                 self.terms.extend(component.to_terms())
             elif isinstance(component, conditions.Term):
                 self.terms.append(component)
@@ -150,6 +154,8 @@ class RxnSystem(monty.json.MSONable):
         # Set the conc diffeqs
         for equation in self.conc_diffeqs:
             odes[self.symbol_index[equation.symbol]] = equation.expression
+
+        print(odes)
 
         return odes
 
@@ -231,11 +237,15 @@ class RxnSystem(monty.json.MSONable):
             return self.color_index
 
         random.seed(3)
-        colors = [] if not self.surface.color else [self.surface.color]
+        colors = []
+        if self.surface and self.surface.color:
+            color = color_to_RGB(self.surface.color)
+            colors.append(color)
+
         if self.color_index is None:
             self.color_index = {}
         for index, symbol in enumerate(self.species_manager.symbols_ordering):
-            if symbol in self.surface.symbols:
+            if self.surface and symbol in self.surface.symbols:
                 continue
             if self.color_index and symbol in self.color_index:
                 continue
@@ -244,26 +254,43 @@ class RxnSystem(monty.json.MSONable):
                 color = color_to_RGB(generate_new_color(colors))
                 colors.append(color)
                 self.species_manager[symbol].color = color
+            else:
+                color = color_to_RGB(color)
 
-            self.color_index[symbol] = self.species_manager[symbol].color
+            self.color_index[symbol] = color
 
         if self.surface:
-            color = self.surface.color
-            if color is None:
+            if self.surface.color is None:
                 color = color_to_RGB(generate_new_color(colors))
                 colors.append(color)
                 self.surface.color = color
-            self.color_index[self.surface.symbol()] = color
+            self.color_index[self.surface.symbol()] = self.surface.color
 
             for s in self.surface.sites:
                 if not s.color:
                     color = color_to_RGB(generate_new_color(colors))
                     s.color = color
                 else:
-                    color = s.color
+                    color = color_to_RGB(s.color)
                 colors.append(color)
                 self.color_index[s.symbol] = color
 
+            for marker_name in self.species_manager.get_marker_names():
+                color = color_to_RGB(generate_new_color(colors))
+                marker_colors = set()
+                for marker in self.species_manager.get_markers(marker_name):
+                    if not marker.color:
+                        marker.color = color
+                    else:
+                        color = color_to_RGB(marker.color)
+                        marker_colors.add(color)
+                if len(marker_colors) > 1:
+                    raise ValueError(f"Marker with name {marker_name} was assigned multiple colors: " +
+                                     ", ".join(marker_colors))
+
+                colors.append(color)
+                # TODO: using a string as key here, whereas all other keys are symbol.symbols
+                self.color_index[marker_name] = color
         return self.color_index
 
     def show_colors(self):
@@ -275,9 +302,40 @@ class RxnSystem(monty.json.MSONable):
     @property
     def surface_names(self) -> List[str]:
         """
-        :return: a list for names for appearance on the surface
+        :return: a list for names that appear on the surface
         """
         return [self.surface.name] + [s.name for s in self.surface.sites]
+    
+    def network_graph(self) -> nx.DiGraph:
+        """Create a reaction network graph (data structure) and return it.
+        """
+        G = nx.DiGraph()
+
+        def add(r, p):
+            for reactant in r:
+                for product in p:
+                    G.add_edge(reactant, product)
+
+        for rxn in self.reactions:
+            r = rxn.reactants.free_symbols
+            p = rxn.products.free_symbols
+            
+            add(r, p)
+            if isinstance(rxn, RevRxn):
+                add(p, r)
+        return G
+    
+    def network_graph_plot(self):
+        """Plot the reaction network graph for this system.
+        """
+        G = self.network_graph()
+
+        nx.draw_shell(G, with_labels=True, **{
+            'node_color': 'lightblue',
+            'node_size': 500,
+            'edge_color': 'gray',
+            'width': 1,
+        })
 
     def __str__(self):
         s = self.__class__.__name__ + ' with components:\n'
